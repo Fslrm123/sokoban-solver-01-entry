@@ -29,10 +29,14 @@ const STEP_LETTER = ['u', 'd', 'l', 'r'];
 const PUSH_LETTER = ['U', 'D', 'L', 'R'];
 const INF = 1_000_000_000;
 
-// Work budgets, in A* expansions (deterministic; the wall is never read).
-const ROOM_BUDGET = 400_000; // per room, per attempt
-const WHOLE_BUDGET = 1_500_000; // whole-level fallback, per attempt
-const GLOBAL_CAP = 8_000_000; // across the whole set
+// Work budgets, in A* expansions (deterministic; the wall is never read). Two pools, because a
+// whole-level expansion (many boxes: a big matching per successor) costs far more than a room one:
+// the caps keep even the pathological path (decomposition failing everywhere) far inside the 60 s
+// wall, while sitting orders of magnitude above what generated levels actually use.
+const ROOM_BUDGET = 200_000; // per room, per attempt
+const WHOLE_BUDGET = 8_000; // whole-level fallback, per attempt
+const ROOM_CAP = 600_000; // room expansions across the whole set
+const WHOLE_CAP = 15_000; // whole-level expansions across the whole set
 
 /** A level in XSB text: width, height, walls (short rows and the outer frame are walls), goals, boxes, player. */
 function parseLevel(text) {
@@ -191,9 +195,10 @@ function matchingByPermutation(cost) {
  * The push search: A* over pushes for one (sub)level. A state is the boxes' squares (sorted) and the
  * player's reachable region named by its lowest square; g counts pushes, h is the matching bound.
  * weight 1 is push-optimal A*; weight > 1 is weighted A*; weight Infinity is greedy best-first.
- * Expands at most maxExpansions states (and never past the shared work cap): {pushes, moves} or null.
+ * Expands at most maxExpansions states (and never past its pool's work cap): {pushes, moves} or null.
+ * `pool` is 'room' or 'whole': which of the work counters this search charges.
  */
-function solvePush(level, maxExpansions, weight, work) {
+function solvePush(level, maxExpansions, weight, work, pool) {
   const { w, wall, goals, boxes: startBoxes, player: startPlayer, goalSet } = level;
   const size = wall.length;
   const nB = startBoxes.length;
@@ -324,8 +329,8 @@ function solvePush(level, maxExpansions, weight, work) {
       break;
     }
     expansions++;
-    if (expansions > maxExpansions || work.expansions + expansions > work.cap) {
-      work.expansions += expansions;
+    if (expansions > maxExpansions || work[pool] + expansions > work[pool + 'Cap']) {
+      work[pool] += expansions;
       return null;
     }
     for (const b of bs) occupied[b] = 1;
@@ -372,7 +377,7 @@ function solvePush(level, maxExpansions, weight, work) {
     }
     for (const b of bs) occupied[b] = 0;
   }
-  work.expansions += expansions;
+  work[pool] += expansions;
   if (found < 0) return null;
 
   // Reconstruct the moves: walk to each push's stand square (shortest walk), then push.
@@ -493,9 +498,9 @@ function solveByRooms(level, rooms, work) {
       const sub = { w: level.w, h: level.h, wall, goals: room.goals, boxes: room.boxes, player, goalSet };
       let solved = null;
       for (const weight of [1, 3, Infinity]) {
-        solved = solvePush(sub, ROOM_BUDGET, weight, work);
+        solved = solvePush(sub, ROOM_BUDGET, weight, work, 'room');
         if (solved !== null) break;
-        if (work.expansions >= work.cap) break;
+        if (work.room >= work.roomCap) break;
       }
       if (solved === null) continue;
       pushes += solved.pushes;
@@ -544,14 +549,14 @@ function solveLevel(text, work) {
     if (byRooms !== null && verify(level, byRooms.moves)) return byRooms.moves;
   }
   for (const weight of [1, 3, Infinity]) {
-    const whole = solvePush(level, WHOLE_BUDGET, weight, work);
+    const whole = solvePush(level, WHOLE_BUDGET, weight, work, 'whole');
     if (whole !== null && verify(level, whole.moves)) return whole.moves;
-    if (work.expansions >= work.cap) break;
+    if (work.whole >= work.wholeCap) break;
   }
   return '';
 }
 
-const work = { expansions: 0, cap: GLOBAL_CAP };
+const work = { room: 0, roomCap: ROOM_CAP, whole: 0, wholeCap: WHOLE_CAP };
 for (const id of readdirSync(I).sort()) {
   let moves = '';
   try {
